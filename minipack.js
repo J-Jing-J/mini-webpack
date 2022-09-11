@@ -24,6 +24,7 @@ const fs = require('fs')
 const path = require('path')
 const { parse } = require('@babel/parser')
 const traverse = require('@babel/traverse').default
+const {transformFromAst} = require('@babel/core')
 
 let ID = 0 // 唯一标识模块的编号
 // 创建每个模块的源信息：asset
@@ -44,10 +45,18 @@ function createAsset(path) {
     }
   })
 
+  // 因为code用变量的形式放在函数中，不认
+  // 要用babel转换一下
+  // 变成了 require(code.js)
+  const { code: transformedCode } = transformFromAst(ast, null, {
+    // babel第三个参数：设置转换的规则
+    presets: ['@babel/preset-env']
+  })
+
   return {
     id: ID++,
     path,
-    code,
+    code: transformedCode,
     deps,
   }
 }
@@ -64,6 +73,7 @@ function createGraph(entryPath) {
 
     // 获取目录
     const dirname = path.dirname(asset.path)
+    asset.mapping = {}
     for (const dep of deps) {
       // 将import进来的依赖，也都进行处理
       // deps是相对路径 --- 获取绝对路径
@@ -71,7 +81,8 @@ function createGraph(entryPath) {
       const child = createAsset(path.join(dirname, deps))
 
       // 生成mapping
-      // deps不知道具体是属于哪一个模块的，ID决定是哪个模块 --- 把相对路径和ID映射起来
+      // deps是相对路径，不知道具体是属于哪一个模块的，ID决定是哪个模块
+      // --- 把 相对路径 和 模块的ID 映射起来
       asset.mapping[dep] = child.id
 
       // 把import进来的放进queue中就行，因为for循环动态读取数组的长度，最终会遍历全部
@@ -83,15 +94,40 @@ function createGraph(entryPath) {
 // 返回可以在浏览器中执行的代码
 // 立即执行函数
 function bondle(graph) {
-  // 传入graph生成的信息: modules
+  // 传入立即函数的信息，一个对象
   let modules = ''
-  graph.forEach(module => {
-    
-  })
-  return `
-    ;(function(){
 
-    })()
+  graph.forEach(module => { 
+    module += `
+      ${module.id}: [
+        // 模块放在function中，形成天然的作用域
+        // 利用CommenJS，传进去require, module, exports
+        function(require, module, exports) {
+          ${module.code}
+        },
+        ${JSON.stringify(module.mapping)}
+      ]
+    `
+  })
+
+  return `
+    ;(function(modules){
+      // 接收 id，运行对应的代码
+      function require(id) {
+        const [fn, mapping] = module[id]
+
+        // 负责通过相对路径找到这个模块，执行代码并获得返回值
+        function localRequire(relativePath) {
+          // mapping[relativePath]拿到的就是映射的id
+          return require(mapping[relativePath])
+        }
+
+        const module = {exports: {}}
+        fn(localRequire, module, exports)
+
+        return module.exports
+      }
+    })({${modules}})
   `
 }
 
